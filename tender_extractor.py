@@ -418,21 +418,21 @@ class TenderDocumentExtractor:
         pages: list[PageText] = []
         current_section = NOT_AVAILABLE
         with pdfplumber.open(document_path) as pdf:
-            page_snapshots: list[tuple[int, object, str, bool, bool]] = []
+            page_snapshots: list[tuple[str, bool]] = []
+            ocr_candidates: list[int] = []
             for page_number, page in enumerate(pdf.pages, start=1):
                 extracted_text = (page.extract_text() or "").strip()
-                page_snapshots.append((
-                    page_number,
-                    page,
-                    extracted_text,
-                    allow_ocr and self._should_apply_ocr(page, extracted_text),
-                    allow_ocr and self._should_ocr_embedded_images(page, extracted_text),
-                ))
+                should_ocr_page = allow_ocr and self._should_apply_ocr(page, extracted_text)
+                should_ocr_images = allow_ocr and self._should_ocr_embedded_images(page, extracted_text)
+                page_snapshots.append((extracted_text, should_ocr_images))
+                if should_ocr_page:
+                    ocr_candidates.append(page_number)
 
-            ocr_candidates = [page_number for page_number, _, _, should_ocr, _ in page_snapshots if should_ocr]
-            allowed_ocr_pages = self._select_ocr_candidate_pages(ocr_candidates, total_pages=len(page_snapshots))
+        allowed_ocr_pages = self._select_ocr_candidate_pages(ocr_candidates, total_pages=len(page_snapshots))
 
-            for page_number, page, extracted_text, _, should_ocr_images in page_snapshots:
+        with pdfplumber.open(document_path) as pdf:
+            for page_number, page in enumerate(pdf.pages, start=1):
+                extracted_text, should_ocr_images = page_snapshots[page_number - 1]
                 ocr_text = ""
                 image_ocr_text = ""
                 full_page_ocr_applied = page_number in allowed_ocr_pages

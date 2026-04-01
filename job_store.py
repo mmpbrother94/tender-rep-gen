@@ -101,6 +101,34 @@ class JobStore:
             ).fetchone()
         return self._row_to_dict(row)
 
+    def list_jobs_by_status(self, statuses: tuple[str, ...] | list[str]) -> list[dict[str, object]]:
+        normalized_statuses = tuple(dict.fromkeys(str(status).strip() for status in statuses if str(status).strip()))
+        if not normalized_statuses:
+            return []
+        placeholders = ", ".join("?" for _ in normalized_statuses)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM jobs WHERE status IN ({placeholders}) ORDER BY created_at ASC",
+                normalized_statuses,
+            ).fetchall()
+        return [snapshot for row in rows if (snapshot := self._row_to_dict(row)) is not None]
+
+    def requeue_incomplete_jobs(self, message: str) -> list[dict[str, object]]:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'queued',
+                    message = ?,
+                    detail = '',
+                    updated_at = ?
+                WHERE status IN ('queued', 'running')
+                """,
+                (message, self._timestamp()),
+            )
+            connection.commit()
+        return self.list_jobs_by_status(["queued"])
+
     def mark_incomplete_jobs_failed(self, detail: str) -> None:
         with self._connect() as connection:
             connection.execute(

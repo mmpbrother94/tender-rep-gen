@@ -96,6 +96,7 @@ python app.py
 - The app now stores uploads, generated workbooks, and generation-job state under `APP_DATA_DIR`. On Railway, point that to a mounted volume.
 - For stability on Railway, the app now writes uploads in chunks and defaults to one generation at a time.
 - Full PDF attachment to OpenAI is disabled by default to reduce Railway restarts from memory spikes. Page-level OCR plus targeted extraction is still used.
-- `Generation job not found` on Railway usually means the service restarted or was using in-memory job state. This project now persists jobs in SQLite, but a mounted volume is still the correct deployment setup.
+- If Railway restarts during generation and the upload volume is mounted, pending jobs are now resumed automatically on startup instead of forcing a fresh upload.
+- `Generation job not found` on Railway usually means the service restarted without a mounted volume or the job database was not persisted.
 - Railway is still a valid deployment target for this app. You do not need to move to another provider just to fix the current issue.
 - Do not commit a real API key into the repository. Keep it only in local env files and Railway variables.

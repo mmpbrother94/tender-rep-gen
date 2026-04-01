@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import re
@@ -45,9 +46,8 @@ logger = logging.getLogger(__name__)
 job_store = JobStore(JOB_DB_PATH)
 max_concurrent_generations = max(1, int(os.getenv("MAX_CONCURRENT_GENERATIONS", "1")))
 generation_slots = threading.Semaphore(max_concurrent_generations)
-job_store.mark_incomplete_jobs_failed(
-    "The service restarted before generation finished. Please upload the document again."
-)
+active_job_ids: set[str] = set()
+active_job_ids_lock = threading.Lock()
 
 app = FastAPI(title="Tender Workbook Generator")
 app.add_middleware(GZipMiddleware, minimum_size=1024)
@@ -191,6 +191,26 @@ def _update_job(job_id: str, **updates: object) -> None:
     job_store.update_job(job_id, **updates)
 
 
+def _claim_job(job_id: str) -> bool:
+    with active_job_ids_lock:
+        if job_id in active_job_ids:
+            return False
+        active_job_ids.add(job_id)
+        return True
+
+
+def _release_job(job_id: str) -> None:
+    with active_job_ids_lock:
+        active_job_ids.discard(job_id)
+
+
+def _cleanup_upload(upload_path: Path) -> None:
+    try:
+        upload_path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Unable to remove upload %s after generation finished", upload_path)
+
+
 def _build_job_response(job_id: str, snapshot: dict[str, object]) -> JSONResponse:
     status = str(snapshot.get("status", "queued"))
     if status == "completed":
@@ -219,39 +239,92 @@ def _build_job_response(job_id: str, snapshot: dict[str, object]) -> JSONRespons
 
 def _run_generation_job(job_id: str, upload_path: Path, safe_name: str, original_name: str) -> None:
     _update_job(job_id, status="queued", message="Upload received. Waiting for an available generation slot.")
-    with generation_slots:
-        _update_job(job_id, status="running", message="Extraction in progress. You can keep this page open.")
-        try:
-            extraction_bundle, evaluation_bundle, synopsis_name, bid_eval_name = _generate_outputs(
-                upload_path,
-                safe_name,
-                original_name,
-            )
-            payload = _build_generation_payload(extraction_bundle, evaluation_bundle, synopsis_name, bid_eval_name)
-        except UnsupportedDocumentError as exc:
+    try:
+        if not upload_path.is_file():
             _update_job(
                 job_id,
                 status="failed",
-                detail=str(exc),
-                message="Generation failed.",
-            )
-            return
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Generation failed for %s", original_name)
-            _update_job(
-                job_id,
-                status="failed",
-                detail=f"Unable to generate synopsis: {exc}",
+                detail="The uploaded file is no longer available on the server. Please upload the document again.",
                 message="Generation failed.",
             )
             return
 
+        with generation_slots:
+            _update_job(job_id, status="running", message="Extraction in progress. You can keep this page open.")
+            try:
+                extraction_bundle, evaluation_bundle, synopsis_name, bid_eval_name = _generate_outputs(
+                    upload_path,
+                    safe_name,
+                    original_name,
+                )
+                payload = _build_generation_payload(extraction_bundle, evaluation_bundle, synopsis_name, bid_eval_name)
+            except UnsupportedDocumentError as exc:
+                _update_job(
+                    job_id,
+                    status="failed",
+                    detail=str(exc),
+                    message="Generation failed.",
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Generation failed for %s", original_name)
+                _update_job(
+                    job_id,
+                    status="failed",
+                    detail=f"Unable to generate synopsis: {exc}",
+                    message="Generation failed.",
+                )
+                return
+
+            _update_job(
+                job_id,
+                status="completed",
+                message="Tender workbooks generated successfully.",
+                result=payload,
+            )
+    finally:
+        _release_job(job_id)
+        _cleanup_upload(upload_path)
+        gc.collect()
+
+
+def _start_generation_worker(job_id: str, upload_path: Path, safe_name: str, original_name: str) -> bool:
+    if not upload_path.is_file():
         _update_job(
             job_id,
-            status="completed",
-            message="Tender workbooks generated successfully.",
-            result=payload,
+            status="failed",
+            detail="The uploaded file is no longer available on the server. Please upload the document again.",
+            message="Generation failed.",
         )
+        return False
+    if not _claim_job(job_id):
+        return False
+    worker = threading.Thread(
+        target=_run_generation_job,
+        args=(job_id, upload_path, safe_name, original_name),
+        daemon=True,
+    )
+    worker.start()
+    return True
+
+
+def _schedule_job_from_snapshot(snapshot: dict[str, object]) -> bool:
+    job_id = str(snapshot.get("job_id", "")).strip()
+    upload_path_raw = str(snapshot.get("upload_path", "")).strip()
+    if not job_id or not upload_path_raw:
+        return False
+    upload_path = Path(upload_path_raw)
+    original_name = Path(str(snapshot.get("source_name", "")).strip()).name or upload_path.name or "document"
+    safe_name = re.sub(r"[^A-Za-z0-9._ -]+", "_", original_name)
+    return _start_generation_worker(job_id, upload_path, safe_name, original_name)
+
+
+@app.on_event("startup")
+def resume_pending_jobs() -> None:
+    resume_message = "The service restarted during generation. Resuming automatically from the uploaded document."
+    for snapshot in job_store.requeue_incomplete_jobs(resume_message):
+        if _schedule_job_from_snapshot(snapshot):
+            logger.info("Resumed pending generation job %s", snapshot.get("job_id"))
 
 
 @app.post("/generate")
@@ -298,12 +371,7 @@ async def generate_synopsis(request: Request, document: UploadFile = File(...)) 
         request_token=request_token,
     )
 
-    worker = threading.Thread(
-        target=_run_generation_job,
-        args=(job_id, upload_path, safe_name, original_name),
-        daemon=True,
-    )
-    worker.start()
+    _start_generation_worker(job_id, upload_path, safe_name, original_name)
 
     return JSONResponse(
         status_code=202,
