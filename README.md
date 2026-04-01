@@ -58,7 +58,10 @@ Do not open `http://0.0.0.0:8000` in the browser. `0.0.0.0` is only the bind add
 - `OPENAI_EXTRACTION_MODEL`: optional, defaults to `gpt-4o-mini`
 - `OPENAI_DOCUMENT_MAX_CHARS`: optional safety cap for the combined document text sent for extraction
 - `OPENAI_MAX_FILE_BYTES`: optional cap for direct PDF attachment to OpenAI, defaults to `52428800` bytes
+- `OPENAI_ATTACH_PDF`: optional, defaults to `false`; keeps Railway memory usage lower by avoiding full-PDF attachment unless you explicitly enable it
+- `OPENAI_ATTACH_PDF_MAX_FILE_BYTES`: optional cap for full-PDF attachment when enabled
 - `APP_DATA_DIR`: optional writable runtime directory for uploads, generated files, and the persistent job database
+- `MAX_CONCURRENT_GENERATIONS`: optional, defaults to `1`; limits heavy document generations to a safe concurrency level
 - `PORT`: optional locally, provided by Railway in deployment
 
 ## Railway deployment
@@ -73,7 +76,10 @@ Do not open `http://0.0.0.0:8000` in the browser. `0.0.0.0` is only the bind add
    - `OPENAI_EXTRACTION_MODEL=gpt-4o-mini`
    - `OPENAI_DOCUMENT_MAX_CHARS=1200000`
    - `OPENAI_MAX_FILE_BYTES=52428800`
+   - `OPENAI_ATTACH_PDF=false`
+   - `OPENAI_ATTACH_PDF_MAX_FILE_BYTES=8388608`
    - `APP_DATA_DIR=/data`
+   - `MAX_CONCURRENT_GENERATIONS=1`
 6. Railway should install dependencies from `requirements.txt`.
 7. If Railway does not auto-detect the start command, set the service `Start Command` to:
 
@@ -88,6 +94,8 @@ python app.py
 
 - The app listens on `0.0.0.0` and uses the `PORT` environment variable, so it is ready for Railway.
 - The app now stores uploads, generated workbooks, and generation-job state under `APP_DATA_DIR`. On Railway, point that to a mounted volume.
+- For stability on Railway, the app now writes uploads in chunks and defaults to one generation at a time.
+- Full PDF attachment to OpenAI is disabled by default to reduce Railway restarts from memory spikes. Page-level OCR plus targeted extraction is still used.
 - `Generation job not found` on Railway usually means the service restarted or was using in-memory job state. This project now persists jobs in SQLite, but a mounted volume is still the correct deployment setup.
 - Railway is still a valid deployment target for this app. You do not need to move to another provider just to fix the current issue.
 - Do not commit a real API key into the repository. Keep it only in local env files and Railway variables.

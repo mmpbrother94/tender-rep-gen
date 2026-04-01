@@ -43,6 +43,8 @@ bid_evaluator = BidEvaluationAnalyzer()
 writer = ExcelWorkbookWriter()
 logger = logging.getLogger(__name__)
 job_store = JobStore(JOB_DB_PATH)
+max_concurrent_generations = max(1, int(os.getenv("MAX_CONCURRENT_GENERATIONS", "1")))
+generation_slots = threading.Semaphore(max_concurrent_generations)
 job_store.mark_incomplete_jobs_failed(
     "The service restarted before generation finished. Please upload the document again."
 )
@@ -216,38 +218,40 @@ def _build_job_response(job_id: str, snapshot: dict[str, object]) -> JSONRespons
 
 
 def _run_generation_job(job_id: str, upload_path: Path, safe_name: str, original_name: str) -> None:
-    _update_job(job_id, status="running", message="Extraction in progress. You can keep this page open.")
-    try:
-        extraction_bundle, evaluation_bundle, synopsis_name, bid_eval_name = _generate_outputs(
-            upload_path,
-            safe_name,
-            original_name,
-        )
-        payload = _build_generation_payload(extraction_bundle, evaluation_bundle, synopsis_name, bid_eval_name)
-    except UnsupportedDocumentError as exc:
-        _update_job(
-            job_id,
-            status="failed",
-            detail=str(exc),
-            message="Generation failed.",
-        )
-        return
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Generation failed for %s", original_name)
-        _update_job(
-            job_id,
-            status="failed",
-            detail=f"Unable to generate synopsis: {exc}",
-            message="Generation failed.",
-        )
-        return
+    _update_job(job_id, status="queued", message="Upload received. Waiting for an available generation slot.")
+    with generation_slots:
+        _update_job(job_id, status="running", message="Extraction in progress. You can keep this page open.")
+        try:
+            extraction_bundle, evaluation_bundle, synopsis_name, bid_eval_name = _generate_outputs(
+                upload_path,
+                safe_name,
+                original_name,
+            )
+            payload = _build_generation_payload(extraction_bundle, evaluation_bundle, synopsis_name, bid_eval_name)
+        except UnsupportedDocumentError as exc:
+            _update_job(
+                job_id,
+                status="failed",
+                detail=str(exc),
+                message="Generation failed.",
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Generation failed for %s", original_name)
+            _update_job(
+                job_id,
+                status="failed",
+                detail=f"Unable to generate synopsis: {exc}",
+                message="Generation failed.",
+            )
+            return
 
-    _update_job(
-        job_id,
-        status="completed",
-        message="Tender workbooks generated successfully.",
-        result=payload,
-    )
+        _update_job(
+            job_id,
+            status="completed",
+            message="Tender workbooks generated successfully.",
+            result=payload,
+        )
 
 
 @app.post("/generate")
@@ -275,7 +279,13 @@ async def generate_synopsis(request: Request, document: UploadFile = File(...)) 
     upload_token = uuid4().hex
     safe_name = re.sub(r"[^A-Za-z0-9._ -]+", "_", original_name)
     upload_path = UPLOAD_DIR / f"{upload_token}_{safe_name}"
-    upload_path.write_bytes(await document.read())
+    with upload_path.open("wb") as output_stream:
+        while True:
+            chunk = await document.read(1024 * 1024)
+            if not chunk:
+                break
+            output_stream.write(chunk)
+    await document.close()
     logger.info("Uploaded %s to %s", original_name, upload_path.name)
 
     job_id = uuid4().hex

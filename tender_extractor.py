@@ -166,14 +166,13 @@ class TenderDocumentExtractor:
 
     def extract_with_pages(self, document_path: str | Path) -> tuple[dict[str, object], list[PageText]]:
         source_path = Path(document_path)
-        allow_pdf_ocr = source_path.suffix.lower() != ".pdf"
+        allow_pdf_ocr = source_path.suffix.lower() != ".pdf" or self._document_intelligence.ocr_available()
 
         pages = self._extract_pages(source_path, allow_ocr=allow_pdf_ocr)
         field_results = self._extract_field_results(pages)
 
         if (
             source_path.suffix.lower() == ".pdf"
-            and not self._document_intelligence.extraction_available()
             and self._should_retry_pdf_with_ocr(field_results)
         ):
             ocr_pages = self._extract_pages(source_path, allow_ocr=True)

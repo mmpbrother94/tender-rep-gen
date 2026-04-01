@@ -26,6 +26,7 @@ DEFAULT_OCR_MODEL = "gpt-4o-mini"
 DEFAULT_EXTRACTION_MODEL = "gpt-4o-mini"
 DEFAULT_DOCUMENT_MAX_CHARS = 1_200_000
 DEFAULT_MAX_FILE_BYTES = 50 * 1024 * 1024
+DEFAULT_PDF_ATTACH_MAX_FILE_BYTES = 8 * 1024 * 1024
 
 
 class PageLike(Protocol):
@@ -72,6 +73,18 @@ class OpenAIDocumentIntelligence:
             return max(1_000_000, min(int(raw_value), DEFAULT_MAX_FILE_BYTES))
         except ValueError:
             return DEFAULT_MAX_FILE_BYTES
+
+    @property
+    def attach_pdf_enabled(self) -> bool:
+        return os.getenv("OPENAI_ATTACH_PDF", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+    @property
+    def pdf_attach_max_file_bytes(self) -> int:
+        raw_value = os.getenv("OPENAI_ATTACH_PDF_MAX_FILE_BYTES", str(DEFAULT_PDF_ATTACH_MAX_FILE_BYTES)).strip()
+        try:
+            return max(1_000_000, min(int(raw_value), DEFAULT_MAX_FILE_BYTES))
+        except ValueError:
+            return DEFAULT_PDF_ATTACH_MAX_FILE_BYTES
 
     def describe_ocr_status(self) -> str:
         if OpenAI is None:
@@ -250,7 +263,9 @@ class OpenAIDocumentIntelligence:
 
     def _can_attach_file(self, source_path: Path) -> bool:
         try:
-            return source_path.is_file() and source_path.stat().st_size <= self.max_file_bytes
+            if not self.attach_pdf_enabled:
+                return False
+            return source_path.is_file() and source_path.stat().st_size <= self.pdf_attach_max_file_bytes
         except OSError:
             return False
 
