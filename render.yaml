@@ -1,0 +1,109 @@
+services:
+  - type: web
+    name: tender-rep-gen-web
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    autoDeployTrigger: commit
+    healthCheckPath: /health
+    maxShutdownDelaySeconds: 300
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_OCR_MODEL
+        value: gpt-4o-mini
+      - key: OPENAI_EXTRACTION_MODEL
+        value: gpt-4o-mini
+      - key: OPENAI_DOCUMENT_MAX_CHARS
+        value: "1200000"
+      - key: OPENAI_MAX_FILE_BYTES
+        value: "52428800"
+      - key: OPENAI_ATTACH_PDF
+        value: "false"
+      - key: OPENAI_ATTACH_PDF_MAX_FILE_BYTES
+        value: "8388608"
+      - key: APP_DATA_DIR
+        value: /data
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: tender-rep-gen-kv
+          property: connectionString
+      - key: INTERNAL_SERVICE_TOKEN
+        generateValue: true
+
+  - type: worker
+    name: tender-rep-gen-worker
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python render_worker.py
+    autoDeployTrigger: commit
+    maxShutdownDelaySeconds: 300
+    envVars:
+      - key: OPENAI_API_KEY
+        fromService:
+          type: web
+          name: tender-rep-gen-web
+          envVarKey: OPENAI_API_KEY
+      - key: OPENAI_OCR_MODEL
+        fromService:
+          type: web
+          name: tender-rep-gen-web
+          envVarKey: OPENAI_OCR_MODEL
+      - key: OPENAI_EXTRACTION_MODEL
+        fromService:
+          type: web
+          name: tender-rep-gen-web
+          envVarKey: OPENAI_EXTRACTION_MODEL
+      - key: OPENAI_DOCUMENT_MAX_CHARS
+        fromService:
+          type: web
+          name: tender-rep-gen-web
+          envVarKey: OPENAI_DOCUMENT_MAX_CHARS
+      - key: OPENAI_MAX_FILE_BYTES
+        fromService:
+          type: web
+          name: tender-rep-gen-web
+          envVarKey: OPENAI_MAX_FILE_BYTES
+      - key: OPENAI_ATTACH_PDF
+        fromService:
+          type: web
+          name: tender-rep-gen-web
+          envVarKey: OPENAI_ATTACH_PDF
+      - key: OPENAI_ATTACH_PDF_MAX_FILE_BYTES
+        fromService:
+          type: web
+          name: tender-rep-gen-web
+          envVarKey: OPENAI_ATTACH_PDF_MAX_FILE_BYTES
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: tender-rep-gen-kv
+          property: connectionString
+      - key: INTERNAL_SERVICE_TOKEN
+        fromService:
+          type: web
+          name: tender-rep-gen-web
+          envVarKey: INTERNAL_SERVICE_TOKEN
+      - key: WEB_INTERNAL_HOSTPORT
+        fromService:
+          type: web
+          name: tender-rep-gen-web
+          property: hostport
+      - key: APP_DATA_DIR
+        value: /tmp/tender-worker
+      - key: WORKER_REQUEUE_ON_STARTUP
+        value: "true"
+      - key: WORKER_POLL_TIMEOUT_SECONDS
+        value: "5"
+
+  - type: keyvalue
+    name: tender-rep-gen-kv
+    plan: starter
+    ipAllowList: []

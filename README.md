@@ -2,14 +2,6 @@
 
 This app uploads a tender document, extracts tender details, fills the bundled `Tender Synopsis Report (2).xlsx` template, fills the bundled `Bid-No Bid Stratergy Sheet V-1.0.xlsx` template, and lets you download both generated workbooks.
 
-## What changed
-
-- OCR now runs through the OpenAI API instead of EasyOCR.
-- The extraction flow still keeps the existing rule-based tender parser as a fallback, but OpenAI now corrects and completes the extracted fields.
-- If a field contains extra detail that should not be squeezed into the main value cell, that extra detail is written into the `Remark` column.
-- Scanned image uploads and weak PDF pages are sent through OpenAI OCR before field extraction.
-- Local `.env` values are now loaded automatically, so `OPENAI_API_KEY` works without exporting it manually in PowerShell.
-
 ## Supported input formats
 
 - `.pdf`
@@ -26,16 +18,10 @@ This app uploads a tender document, extracts tender details, fills the bundled `
 
 If a synopsis field is not found in the uploaded document, the generated workbook writes `Not Available`.
 
-## Output files
+## Architecture modes
 
-- `Tender Synopsis Report (2).xlsx` filled from the tender document
-- `Bid-No Bid Stratergy Sheet V-1.0.xlsx` filled with allocation scores, total percentage, and highlighted category
-
-## Prerequisites
-
-- Python 3.13+
-- Packages from `requirements.txt`
-- `OPENAI_API_KEY` set in the environment
+- Local mode: if `REDIS_URL` is not set, the app keeps the existing single-service background-thread flow.
+- Render queue mode: if `REDIS_URL` is set, the web service only handles upload, status, and download. A separate Render worker pulls jobs from Redis, generates the workbooks, and sends the files back to the web service over Render's private network.
 
 ## Local run
 
@@ -56,47 +42,69 @@ Do not open `http://0.0.0.0:8000` in the browser. `0.0.0.0` is only the bind add
 - `OPENAI_API_KEY`: required for OCR and OpenAI-based field correction
 - `OPENAI_OCR_MODEL`: optional, defaults to `gpt-4o-mini`
 - `OPENAI_EXTRACTION_MODEL`: optional, defaults to `gpt-4o-mini`
-- `OPENAI_DOCUMENT_MAX_CHARS`: optional safety cap for the combined document text sent for extraction
-- `OPENAI_MAX_FILE_BYTES`: optional cap for direct PDF attachment to OpenAI, defaults to `52428800` bytes
-- `OPENAI_ATTACH_PDF`: optional, defaults to `false`; keeps Railway memory usage lower by avoiding full-PDF attachment unless you explicitly enable it
+- `OPENAI_DOCUMENT_MAX_CHARS`: optional cap for combined document text sent for extraction
+- `OPENAI_MAX_FILE_BYTES`: optional cap for direct PDF attachment to OpenAI
+- `OPENAI_ATTACH_PDF`: optional, defaults to `false`
 - `OPENAI_ATTACH_PDF_MAX_FILE_BYTES`: optional cap for full-PDF attachment when enabled
-- `APP_DATA_DIR`: optional writable runtime directory for uploads, generated files, and the persistent job database
-- `MAX_CONCURRENT_GENERATIONS`: optional, defaults to `1`; limits heavy document generations to a safe concurrency level
-- `PORT`: optional locally, provided by Railway in deployment
+- `APP_DATA_DIR`: writable runtime directory
+- `MAX_CONCURRENT_GENERATIONS`: local-only safety limit for in-process generation
+- `REDIS_URL`: enables queue mode for Render-style deployment
+- `INTERNAL_SERVICE_TOKEN`: shared secret between the Render web service and worker
+- `WEB_INTERNAL_HOSTPORT`: internal Render address of the web service for the worker
+- `WEB_INTERNAL_BASE_URL`: optional explicit internal base URL for the worker
+- `WORKER_REQUEUE_ON_STARTUP`: optional, defaults to `true`
+- `WORKER_POLL_TIMEOUT_SECONDS`: optional worker queue wait time
+- `PORT`: provided automatically by Render and Railway
 
-## Railway deployment
+## Render deployment
 
-1. Push this project to GitHub.
-2. In Railway, create a new project and choose `Deploy from GitHub repo`.
-3. Select this repository.
-4. Add a Railway volume and mount it to a stable path such as `/data`.
-5. In the Railway service `Variables` tab, add:
-   - `OPENAI_API_KEY`
-   - `OPENAI_OCR_MODEL=gpt-4o-mini`
-   - `OPENAI_EXTRACTION_MODEL=gpt-4o-mini`
-   - `OPENAI_DOCUMENT_MAX_CHARS=1200000`
-   - `OPENAI_MAX_FILE_BYTES=52428800`
-   - `OPENAI_ATTACH_PDF=false`
-   - `OPENAI_ATTACH_PDF_MAX_FILE_BYTES=8388608`
-   - `APP_DATA_DIR=/data`
-   - `MAX_CONCURRENT_GENERATIONS=1`
-6. Railway should install dependencies from `requirements.txt`.
-7. If Railway does not auto-detect the start command, set the service `Start Command` to:
+The repository now includes [render.yaml](./render.yaml) for a three-service Render deployment:
 
-```bash
-python app.py
-```
+- `tender-rep-gen-web`
+- `tender-rep-gen-worker`
+- `tender-rep-gen-kv`
 
-8. Deploy the service.
-9. After deploy, open the generated public URL and confirm `/health` returns `{"status":"ok"}`.
+### Deploy with the Blueprint
 
-## Notes
+1. Push the latest code to GitHub.
+2. In Render, open `Blueprints` and create a new Blueprint from this repository.
+3. Review the services defined in `render.yaml`.
+4. Provide `OPENAI_API_KEY` when Render prompts for secret values.
+5. Approve the Blueprint deploy.
+6. Wait for these services to become healthy:
+   - web service
+   - background worker
+   - key value
+7. Open the web service URL and confirm `/health` returns `{"status":"ok"}`.
 
-- The app listens on `0.0.0.0` and uses the `PORT` environment variable, so it is ready for Railway.
-- The app now stores uploads, generated workbooks, and generation-job state under `APP_DATA_DIR`. On Railway, point that to a mounted volume.
-- For stability on Railway, the app now writes uploads in chunks and defaults to one generation at a time.
-- Full PDF attachment to OpenAI is disabled by default to reduce Railway restarts from memory spikes. Page-level OCR plus targeted extraction is still used.
-- If Railway restarts during generation and the upload volume is mounted, pending jobs are now resumed automatically on startup instead of forcing a fresh upload.
-- `Generation job not found` on Railway usually means the service restarted without a mounted volume or the job database was not persisted.
-- Railway is still a valid deployment target for this app. You do not need to move to another provider just to fix the current issue.
-- Do not commit a real API key into the repository. Keep it only in local env files and Railway variables.
+### What the Render Blueprint sets up
+
+- A paid `starter` web service with a persistent disk mounted at `/data`
+- A paid `starter` background worker
+- A paid `starter` Render Key Value instance for queue and job state
+- Shared environment wiring between the services
+
+### Why the Render deployment uses paid services
+
+- The web service needs a persistent disk for uploads and generated workbooks.
+- The worker needs to call the web service over Render's private network.
+- Free web services cannot receive private-network traffic and cannot use persistent disks.
+- Free Key Value instances are in-memory only, so queue and job state can be lost on restart.
+
+## Worker flow on Render
+
+1. The web service stores the uploaded file on its disk.
+2. The web service creates a job in Redis and enqueues it.
+3. The worker pulls the job from Redis.
+4. The worker downloads the source file from the web service over Render's private network.
+5. The worker generates both workbooks.
+6. The worker uploads the generated `.xlsx` files back to the web service.
+7. The web service serves the final downloads from its persistent disk.
+
+## Railway note
+
+Railway support still exists for single-service deployment, but the repo is now optimized for Render queue mode because that is the safer path for long-running OCR and workbook generation.
+
+## Security note
+
+Do not commit a real API key into the repository. Keep it only in local env files and in Render or Railway secrets.

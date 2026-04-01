@@ -279,7 +279,7 @@ async function startGeneration(formData, requestId, fileName) {
   }
 
   throw new Error(
-    `Unable to reach the server. If you are using the temporary public link, keep the host PC on and the app running. ${lastError?.message || ""}`.trim(),
+    `Unable to reach the server. Check that the deployment is online and retry. ${lastError?.message || ""}`.trim(),
   );
 }
 
@@ -322,7 +322,7 @@ async function pollGeneration(jobId) {
       consecutiveNetworkErrors += 1;
       if (consecutiveNetworkErrors >= maxPollNetworkErrors) {
         throw new Error(
-          "The connection kept dropping during processing. If you are using the temporary public link, keep the host PC on and rerun the public tunnel if needed.",
+          "The connection kept dropping during processing. Check the hosting service logs and retry the document once the worker is healthy.",
         );
       }
 

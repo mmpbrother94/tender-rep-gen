@@ -9,6 +9,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -16,8 +17,8 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from env_loader import load_local_env
 from bid_evaluator import BidEvaluationAnalyzer
+from env_loader import load_local_env
 from excel_writer import ExcelWorkbookWriter
 from job_store import JobStore
 from synopsis_builder import build_synopsis_rows, summarize_synopsis_rows
@@ -35,6 +36,7 @@ JOB_DB_PATH = DATA_DIR / "generation_jobs.sqlite3"
 STATIC_DIR = BASE_DIR / "static"
 FAVICON_PATH = STATIC_DIR / "favicon.ico"
 HTML_PAGE = BASE_DIR / "templates" / "index.html"
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "").strip()
 
 for directory in (DATA_DIR, UPLOAD_DIR, GENERATED_DIR):
     directory.mkdir(parents=True, exist_ok=True)
@@ -204,11 +206,23 @@ def _release_job(job_id: str) -> None:
         active_job_ids.discard(job_id)
 
 
-def _cleanup_upload(upload_path: Path) -> None:
+def _resolve_within_directory(raw_path: str | Path, directory: Path) -> Path | None:
     try:
-        upload_path.unlink(missing_ok=True)
+        resolved = Path(raw_path).resolve()
+        resolved.relative_to(directory.resolve())
+    except (OSError, ValueError):
+        return None
+    return resolved
+
+
+def _cleanup_upload(upload_path: Path) -> None:
+    resolved = _resolve_within_directory(upload_path, UPLOAD_DIR)
+    if resolved is None:
+        return
+    try:
+        resolved.unlink(missing_ok=True)
     except OSError:
-        logger.warning("Unable to remove upload %s after generation finished", upload_path)
+        logger.warning("Unable to remove upload %s after generation finished", resolved)
 
 
 def _build_job_response(job_id: str, snapshot: dict[str, object]) -> JSONResponse:
@@ -319,8 +333,19 @@ def _schedule_job_from_snapshot(snapshot: dict[str, object]) -> bool:
     return _start_generation_worker(job_id, upload_path, safe_name, original_name)
 
 
+def _require_internal_request(request: Request) -> None:
+    if not INTERNAL_SERVICE_TOKEN:
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVICE_TOKEN is not configured.")
+    provided_token = request.headers.get("x-internal-token", "").strip()
+    if provided_token != INTERNAL_SERVICE_TOKEN:
+        raise HTTPException(status_code=403, detail="Internal access denied.")
+
+
 @app.on_event("startup")
 def resume_pending_jobs() -> None:
+    if job_store.queue_enabled:
+        logger.info("Redis-backed queue mode enabled. Waiting for the worker service to resume pending jobs.")
+        return
     resume_message = "The service restarted during generation. Resuming automatically from the uploaded document."
     for snapshot in job_store.requeue_incomplete_jobs(resume_message):
         if _schedule_job_from_snapshot(snapshot):
@@ -340,6 +365,8 @@ async def generate_synopsis(request: Request, document: UploadFile = File(...)) 
     if request_token:
         existing_job = job_store.get_job_by_request_token(request_token)
         if isinstance(existing_job, dict):
+            if job_store.queue_enabled and str(existing_job.get("status", "")) in {"queued", "running"}:
+                job_store.enqueue_job(str(existing_job["job_id"]))
             logger.info("Reusing generation job %s for request token %s", existing_job["job_id"], request_token)
             return _build_job_response(str(existing_job["job_id"]), existing_job)
 
@@ -371,7 +398,10 @@ async def generate_synopsis(request: Request, document: UploadFile = File(...)) 
         request_token=request_token,
     )
 
-    _start_generation_worker(job_id, upload_path, safe_name, original_name)
+    if job_store.queue_enabled:
+        job_store.enqueue_job(job_id)
+    else:
+        _start_generation_worker(job_id, upload_path, safe_name, original_name)
 
     return JSONResponse(
         status_code=202,
@@ -394,17 +424,63 @@ def generation_status(job_id: str) -> JSONResponse:
 @app.get("/download/{file_name}")
 def download_file(file_name: str) -> FileResponse:
     safe_name = Path(file_name).name
-    output_path = (GENERATED_DIR / safe_name).resolve()
-    if output_path.parent != GENERATED_DIR.resolve() or not output_path.exists():
+    output_path = _resolve_within_directory(GENERATED_DIR / safe_name, GENERATED_DIR)
+    if output_path is None or not output_path.exists():
         raise HTTPException(status_code=404, detail="Generated file not found.")
     media_type = "application/octet-stream"
     if output_path.suffix.lower() == ".xlsx":
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    return FileResponse(
-        output_path,
-        media_type=media_type,
-        filename=safe_name,
-    )
+    return FileResponse(output_path, media_type=media_type, filename=safe_name)
+
+
+@app.get("/internal/jobs/{job_id}/source")
+def internal_job_source(job_id: str, request: Request) -> FileResponse:
+    _require_internal_request(request)
+    snapshot = job_store.get_job(job_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Generation job not found.")
+    upload_path = _resolve_within_directory(str(snapshot.get("upload_path", "")), UPLOAD_DIR)
+    if upload_path is None or not upload_path.exists():
+        raise HTTPException(status_code=404, detail="Uploaded source file not found.")
+    source_name = Path(str(snapshot.get("source_name", "")).strip()).name or upload_path.name
+    response = FileResponse(upload_path, media_type="application/octet-stream", filename=source_name)
+    response.headers["X-Source-Name"] = quote(source_name)
+    return response
+
+
+@app.put("/internal/jobs/{job_id}/outputs/{artifact_name}")
+async def internal_store_output(job_id: str, artifact_name: str, request: Request) -> JSONResponse:
+    _require_internal_request(request)
+    if artifact_name not in {"synopsis", "bid_evaluation"}:
+        raise HTTPException(status_code=400, detail="Unsupported output artifact.")
+    if job_store.get_job(job_id) is None:
+        raise HTTPException(status_code=404, detail="Generation job not found.")
+
+    file_name = Path(request.query_params.get("file_name", "")).name
+    if not file_name or Path(file_name).suffix.lower() != ".xlsx":
+        raise HTTPException(status_code=400, detail="A valid XLSX file name is required.")
+    payload = await request.body()
+    if not payload:
+        raise HTTPException(status_code=400, detail="Uploaded artifact body is empty.")
+
+    output_path = _resolve_within_directory(GENERATED_DIR / file_name, GENERATED_DIR)
+    if output_path is None:
+        raise HTTPException(status_code=400, detail="Invalid output file path.")
+    output_path.write_bytes(payload)
+    return JSONResponse({"file_name": file_name, "download_url": f"/download/{file_name}"})
+
+
+@app.delete("/internal/jobs/{job_id}/source")
+def internal_delete_source(job_id: str, request: Request) -> JSONResponse:
+    _require_internal_request(request)
+    snapshot = job_store.get_job(job_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Generation job not found.")
+    upload_path = _resolve_within_directory(str(snapshot.get("upload_path", "")), UPLOAD_DIR)
+    if upload_path is None:
+        raise HTTPException(status_code=404, detail="Uploaded source file not found.")
+    _cleanup_upload(upload_path)
+    return JSONResponse({"job_id": job_id, "deleted": True})
 
 
 if __name__ == "__main__":

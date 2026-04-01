@@ -4,4 +4,5 @@ openpyxl
 pdfplumber
 pillow
 python-multipart
+redis
 uvicorn[standard]
