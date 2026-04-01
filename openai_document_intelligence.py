@@ -197,9 +197,12 @@ class OpenAIDocumentIntelligence:
         if source_path.suffix.lower() == ".pdf" and self._can_attach_file(source_path):
             request_content.append(
                 {
-                    "type": "input_file",
-                    "filename": source_path.name,
-                    "file_data": self._file_to_base64(source_path),
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": self._file_to_base64(source_path),
+                    },
                 }
             )
 
