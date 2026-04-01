@@ -18,30 +18,34 @@ from fastapi.staticfiles import StaticFiles
 from env_loader import load_local_env
 from bid_evaluator import BidEvaluationAnalyzer
 from excel_writer import ExcelWorkbookWriter
+from job_store import JobStore
 from synopsis_builder import build_synopsis_rows, summarize_synopsis_rows
 from tender_extractor import TenderDocumentExtractor, UnsupportedDocumentError
 
 load_local_env()
 
 BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.getenv("APP_DATA_DIR") or os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or BASE_DIR)
 SYNOPSIS_TEMPLATE_PATH = BASE_DIR / "Tender Synopsis Report (2).xlsx"
 BID_EVALUATION_TEMPLATE_PATH = BASE_DIR / "Bid-No Bid Stratergy Sheet V-1.0.xlsx"
-UPLOAD_DIR = BASE_DIR / "uploads"
-GENERATED_DIR = BASE_DIR / "generated"
+UPLOAD_DIR = DATA_DIR / "uploads"
+GENERATED_DIR = DATA_DIR / "generated"
+JOB_DB_PATH = DATA_DIR / "generation_jobs.sqlite3"
 STATIC_DIR = BASE_DIR / "static"
 FAVICON_PATH = STATIC_DIR / "favicon.ico"
 HTML_PAGE = BASE_DIR / "templates" / "index.html"
 
-for directory in (UPLOAD_DIR, GENERATED_DIR):
-    directory.mkdir(exist_ok=True)
+for directory in (DATA_DIR, UPLOAD_DIR, GENERATED_DIR):
+    directory.mkdir(parents=True, exist_ok=True)
 
 extractor = TenderDocumentExtractor()
 bid_evaluator = BidEvaluationAnalyzer()
 writer = ExcelWorkbookWriter()
 logger = logging.getLogger(__name__)
-job_lock = threading.Lock()
-generation_jobs: dict[str, dict[str, object]] = {}
-request_jobs: dict[str, str] = {}
+job_store = JobStore(JOB_DB_PATH)
+job_store.mark_incomplete_jobs_failed(
+    "The service restarted before generation finished. Please upload the document again."
+)
 
 app = FastAPI(title="Tender Workbook Generator")
 app.add_middleware(GZipMiddleware, minimum_size=1024)
@@ -182,11 +186,7 @@ def _generate_outputs(upload_path: Path, safe_name: str, original_name: str) -> 
 
 
 def _update_job(job_id: str, **updates: object) -> None:
-    with job_lock:
-        job = generation_jobs.get(job_id)
-        if job is None:
-            return
-        job.update(updates)
+    job_store.update_job(job_id, **updates)
 
 
 def _build_job_response(job_id: str, snapshot: dict[str, object]) -> JSONResponse:
@@ -261,14 +261,10 @@ async def generate_synopsis(request: Request, document: UploadFile = File(...)) 
 
     request_token = _normalize_request_token(request.headers.get("x-upload-id"))
     if request_token:
-        with job_lock:
-            existing_job_id = request_jobs.get(request_token)
-            existing_job = generation_jobs.get(existing_job_id) if existing_job_id else None
-            if existing_job_id and isinstance(existing_job, dict):
-                logger.info("Reusing generation job %s for request token %s", existing_job_id, request_token)
-                return _build_job_response(existing_job_id, dict(existing_job))
-            if existing_job_id and existing_job is None:
-                request_jobs.pop(request_token, None)
+        existing_job = job_store.get_job_by_request_token(request_token)
+        if isinstance(existing_job, dict):
+            logger.info("Reusing generation job %s for request token %s", existing_job["job_id"], request_token)
+            return _build_job_response(str(existing_job["job_id"]), existing_job)
 
     original_name = Path(document.filename).name
     extension = Path(original_name).suffix.lower()
@@ -283,14 +279,14 @@ async def generate_synopsis(request: Request, document: UploadFile = File(...)) 
     logger.info("Uploaded %s to %s", original_name, upload_path.name)
 
     job_id = uuid4().hex
-    with job_lock:
-        generation_jobs[job_id] = {
-            "status": "queued",
-            "message": "Upload received. Processing has started.",
-            "source_name": original_name,
-        }
-        if request_token:
-            request_jobs[request_token] = job_id
+    job_store.create_job(
+        job_id=job_id,
+        status="queued",
+        message="Upload received. Processing has started.",
+        source_name=original_name,
+        upload_path=str(upload_path),
+        request_token=request_token,
+    )
 
     worker = threading.Thread(
         target=_run_generation_job,
@@ -311,12 +307,9 @@ async def generate_synopsis(request: Request, document: UploadFile = File(...)) 
 
 @app.get("/jobs/{job_id}")
 def generation_status(job_id: str) -> JSONResponse:
-    with job_lock:
-        job = generation_jobs.get(job_id)
-        if job is None:
-            raise HTTPException(status_code=404, detail="Generation job not found.")
-        snapshot = dict(job)
-
+    snapshot = job_store.get_job(job_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Generation job not found or expired.")
     return _build_job_response(job_id, snapshot)
 
 

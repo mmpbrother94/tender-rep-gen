@@ -26,6 +26,7 @@ const maxStartAttempts = 3;
 const maxPollNetworkErrors = 12;
 const pollDelayMs = 2500;
 const retryBaseDelayMs = 2000;
+const maxSavedJobAgeMs = 12 * 60 * 60 * 1000;
 
 const processingMessages = [
   "Reading the document structure and identifying the tender sections.",
@@ -200,7 +201,13 @@ function readActiveJob() {
     if (!rawValue) {
       return null;
     }
-    return JSON.parse(rawValue);
+    const parsed = JSON.parse(rawValue);
+    const savedAt = parsed?.savedAt ? Date.parse(parsed.savedAt) : NaN;
+    if (Number.isFinite(savedAt) && (Date.now() - savedAt) > maxSavedJobAgeMs) {
+      window.localStorage.removeItem(activeJobStorageKey);
+      return null;
+    }
+    return parsed;
   } catch (error) {
     window.localStorage.removeItem(activeJobStorageKey);
     return null;
@@ -285,6 +292,10 @@ async function pollGeneration(jobId) {
     try {
       const { response, payload } = await fetchJson(`/jobs/${jobId}`);
       if (!response.ok) {
+        if (response.status === 404) {
+          clearActiveJob();
+          throw new Error("The previous generation job is no longer available on the server. Upload the document again.");
+        }
         const message = payload.detail || "Unable to read job status.";
         if (response.status >= 500) {
           throw createRetryableError(message);

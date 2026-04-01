@@ -1834,7 +1834,19 @@ class TenderDocumentExtractor:
                         supply_block_list = [supply_blocks[key] for key in ("A1(I)", "A1(II)", "A1(III)", "A1(IV)", "A1(V)", "A1(VI)") if key in supply_blocks]
                         supply_regular = [supply_blocks[key] for key in ("A1(II)", "A1(III)", "A1(IV)", "A1(V)", "A1(VI)") if key in supply_blocks]
                         supply_extras = supply_regular[2:-1] if len(supply_regular) > 3 else []
-                        supply_remark = self._format_additional_payment_blocks("Additional supply installments", supply_extras)
+                        supply_remark = self._join_remark_parts(
+                            [
+                                self._format_additional_payment_blocks("Additional supply installments", supply_extras),
+                                self._trim_length(
+                                    "Full supply payment detail: "
+                                    + " | ".join(
+                                        f"{block.clause}: {self._payment_block_text(block)}"
+                                        for block in supply_block_list
+                                    ),
+                                    limit=MAX_REMARK_LENGTH,
+                                ),
+                            ]
+                        )
                         results.append(
                             self._make_result(
                                 row_number=34,
@@ -1857,6 +1869,7 @@ class TenderDocumentExtractor:
                                     page=self._page_reference_from_blocks([block]),
                                     section="Section VII",
                                     clause=block.clause,
+                                    remark=self._payment_block_remark(block),
                                 )
                             )
 
@@ -1879,9 +1892,21 @@ class TenderDocumentExtractor:
                         installation_advances = [installation_blocks[key] for key in ("D(I)(A)", "D(I)(B)") if key in installation_blocks]
                         installation_regular = [installation_blocks[key] for key in ("D(II)", "D(III)", "D(IV)", "D(V)") if key in installation_blocks]
                         installation_extras = installation_regular[2:-1] if len(installation_regular) > 3 else []
-                        installation_remark = self._format_additional_payment_blocks(
-                            "Additional installation installments",
-                            installation_extras,
+                        installation_remark = self._join_remark_parts(
+                            [
+                                self._format_additional_payment_blocks(
+                                    "Additional installation installments",
+                                    installation_extras,
+                                ),
+                                self._trim_length(
+                                    "Full installation payment detail: "
+                                    + " | ".join(
+                                        f"{block.clause}: {self._payment_block_text(block)}"
+                                        for block in installation_advances + installation_regular
+                                    ),
+                                    limit=MAX_REMARK_LENGTH,
+                                ),
+                            ]
                         )
 
                         if installation_advances:
@@ -1893,6 +1918,9 @@ class TenderDocumentExtractor:
                                     page=self._page_reference_from_blocks(installation_advances),
                                     section="Section VII",
                                     clause="D(I)(A)-D(I)(B)" if len(installation_advances) > 1 else installation_advances[0].clause,
+                                    remark=self._join_remark_parts(
+                                        [self._payment_block_remark(block) for block in installation_advances]
+                                    ),
                                 )
                             )
 
@@ -3073,10 +3101,9 @@ class TenderDocumentExtractor:
         return {key: block for key, block in blocks.items() if block.lines}
 
     def _summarize_payment_block(self, block: PaymentBlock, limit: int = MAX_VALUE_LENGTH) -> str:
-        text = self._clean_text(" ".join(block.lines))
-        text = re.sub(r"^\((?:[IVX]+)\)\s*(?:\([A-Z]\))?\s*", "", text)
-        text = re.sub(r"^[IVX]+\.\s*", "", text)
-        return self._trim_length(text, limit=limit)
+        verbose_text = self._payment_block_text(block)
+        concise_text = self._compact_payment_text(verbose_text)
+        return self._trim_length(concise_text or verbose_text, limit=limit)
 
     def _summarize_payment_overview(self, blocks: list[PaymentBlock]) -> str:
         parts = [self._summarize_payment_block(block, limit=MAX_VALUE_LENGTH) for block in blocks if block.lines]
@@ -3094,6 +3121,63 @@ class TenderDocumentExtractor:
             return ""
         parts = [f"{block.clause}: {self._summarize_payment_block(block, limit=MAX_VALUE_LENGTH)}" for block in blocks]
         return self._trim_length(f"{prefix}: {'; '.join(parts)}", limit=MAX_VALUE_LENGTH)
+
+    def _payment_block_text(self, block: PaymentBlock) -> str:
+        text = self._clean_text(" ".join(block.lines))
+        text = re.sub(r"^\((?:[IVX]+)\)\s*(?:\([A-Z]\))?\s*", "", text)
+        text = re.sub(r"^[IVX]+\.\s*", "", text)
+        return text
+
+    def _compact_payment_text(self, text: str) -> str:
+        if not text:
+            return ""
+        segments = [self._clean_text(segment) for segment in re.split(r";\s*", text) if self._clean_text(segment)]
+        compact_segments = [
+            compact
+            for compact in (
+                self._compact_payment_segment(segment)
+                for segment in segments[:6]
+            )
+            if compact
+        ]
+        if compact_segments:
+            return self._trim_length("; ".join(dict.fromkeys(compact_segments)), limit=MAX_VALUE_LENGTH)
+        first_sentence = re.split(r"(?<=[.])\s+", text, maxsplit=1)[0]
+        return self._trim_length(first_sentence, limit=MAX_VALUE_LENGTH)
+
+    def _compact_payment_segment(self, segment: str) -> str:
+        lowered_segment = segment.lower()
+        percent_match = re.search(r"(\d+(?:\.\d+)?)\s*%", segment)
+        percent_prefix = f"{percent_match.group(1)}% " if percent_match is not None else ""
+
+        if "advance payment" in lowered_segment:
+            if "t&p mobilisation" in lowered_segment:
+                return f"{percent_prefix}T&P mobilisation advance".strip()
+            if "installation services" in lowered_segment or "office at site" in lowered_segment:
+                return f"{percent_prefix}installation advance".strip()
+            return f"{percent_prefix}initial advance".strip()
+        if "dispatch of equipment" in lowered_segment or "evidence of shipment" in lowered_segment:
+            return f"{percent_prefix}on dispatch from works".strip()
+        if "receipt of equipment at site" in lowered_segment:
+            return f"{percent_prefix}on receipt at site".strip()
+        if "completion of installation" in lowered_segment or "quantum of work completed" in lowered_segment:
+            return f"{percent_prefix}progressive payment during installation".strip()
+        if "successful commissioning of part capacity" in lowered_segment:
+            return f"{percent_prefix}on part commissioning".strip()
+        if "completion certificate" in lowered_segment or "completion of the facilities" in lowered_segment:
+            return f"{percent_prefix}on completion certificate".strip()
+        if "operational acceptance certificate" in lowered_segment or "performance guarantee tests" in lowered_segment:
+            return f"{percent_prefix}on operational acceptance".strip()
+        if "bearing interest at the rate of" in lowered_segment:
+            return self._trim_length(segment, limit=220)
+        return ""
+
+    def _payment_block_remark(self, block: PaymentBlock) -> str:
+        verbose_text = self._payment_block_text(block)
+        concise_text = self._compact_payment_text(verbose_text)
+        if not verbose_text or concise_text == verbose_text:
+            return ""
+        return self._trim_length(f"Full clause detail: {verbose_text}", limit=MAX_REMARK_LENGTH)
 
     def _map_payment_installment_rows(
         self,
@@ -3114,6 +3198,7 @@ class TenderDocumentExtractor:
                     page=self._page_reference_from_blocks([block]),
                     section=default_section,
                     clause=block.clause,
+                    remark=self._payment_block_remark(block),
                 )
             )
         return results
