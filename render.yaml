@@ -7,7 +7,6 @@ services:
     startCommand: python app.py
     autoDeployTrigger: commit
     healthCheckPath: /health
-    maxShutdownDelaySeconds: 300
     disk:
       name: data
       mountPath: /data
