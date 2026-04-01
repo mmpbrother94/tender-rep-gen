@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tender Workbook Generator</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <section class="hero-card">
+      <p class="eyebrow">Tender Processing Workspace</p>
+      <h1>Upload one tender document and generate both the synopsis and bid evaluation workbooks.</h1>
+      <p class="hero-copy">
+        The app reads the tender document, fills <strong>Tender Synopsis Report</strong>,
+        fills <strong>Bid-No Bid Stratergy Sheet</strong>, marks unavailable synopsis fields as
+        <strong>Not Available</strong>, calculates the bid score, writes the actual percentage, and highlights the
+        matching bid category.
+      </p>
+      <div class="hero-grid">
+        <div>
+          <span class="hero-label">Input</span>
+          <p>PDF, DOCX, TXT, RTF, PNG, JPG, JPEG, BMP, TIFF, WEBP</p>
+        </div>
+        <div>
+          <span class="hero-label">Outputs</span>
+          <p>Synopsis workbook and bid evaluation workbook</p>
+        </div>
+        <div>
+          <span class="hero-label">Result</span>
+          <p>Two separate downloads from one upload</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="work-card">
+      <div id="processing-loader" class="processing-loader hidden" aria-live="polite" aria-hidden="true">
+        <div class="processing-shell">
+          <div class="processing-spinner" aria-hidden="true"></div>
+          <p class="eyebrow">Processing Document</p>
+          <h2>Reading the tender and generating both workbooks.</h2>
+          <p id="loader-copy" class="processing-copy">Analyzing the uploaded document structure.</p>
+        </div>
+      </div>
+
+      <form id="upload-form" class="upload-form">
+        <label class="upload-panel" for="document">
+          <span class="upload-title">Choose tender document</span>
+          <span class="upload-copy">Drop one document or image here or browse from disk.</span>
+          <input id="document" name="document" type="file" accept=".pdf,.docx,.txt,.rtf,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp" required>
+        </label>
+        <button id="submit-button" type="submit">Generate Workbooks</button>
+      </form>
+
+      <div id="status" class="status-panel hidden"></div>
+
+      <section id="result" class="result-panel hidden">
+        <div class="result-head">
+          <div>
+            <p class="eyebrow">Generation Result</p>
+            <h2>Downloads and Preview</h2>
+          </div>
+        </div>
+
+        <div class="result-meta" id="result-meta"></div>
+
+        <div class="insight-grid">
+          <article class="score-card">
+            <span class="score-label">Estimated Accuracy</span>
+            <strong id="accuracy-percentage">0.00%</strong>
+            <p id="accuracy-note" class="insight-copy">Heuristic confidence based on the document and extraction strength.</p>
+          </article>
+          <article class="score-card">
+            <span class="score-label">Field Coverage</span>
+            <strong id="coverage-percentage">0.00%</strong>
+            <p id="coverage-note" class="insight-copy">Share of synopsis fields populated from the uploaded document.</p>
+          </article>
+          <article class="score-card">
+            <span class="score-label">OCR Support</span>
+            <strong id="ocr-status">Not Used</strong>
+            <p id="ocr-note" class="insight-copy">Image uploads and image-based PDF pages are read with OCR when needed.</p>
+          </article>
+        </div>
+
+        <div class="download-grid">
+          <article class="download-card">
+            <p class="eyebrow">Option 1</p>
+            <h3>Synopsis</h3>
+            <p>Filled from the tender document into the bundled synopsis template.</p>
+            <a id="synopsis-link" class="download-link" href="#" download>Download Synopsis</a>
+          </article>
+          <article class="download-card">
+            <p class="eyebrow">Option 2</p>
+            <h3>BID Evaluation</h3>
+            <p>Allocation score, actual percentage, and category highlight inside the strategy sheet.</p>
+            <a id="bid-link" class="download-link alt" href="#" download>Download BID Evaluation</a>
+          </article>
+        </div>
+
+        <div class="preview-switcher">
+          <button type="button" class="preview-tab active" data-panel="synopsis-preview">Synopsis Preview</button>
+          <button type="button" class="preview-tab" data-panel="evaluation-preview">BID Evaluation Preview</button>
+        </div>
+
+        <section id="synopsis-preview" class="preview-panel">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Row</th>
+                  <th>Particular</th>
+                  <th>Section</th>
+                  <th>Clause</th>
+                  <th>Page</th>
+                  <th>Description</th>
+                  <th>Remark</th>
+                </tr>
+              </thead>
+              <tbody id="synopsis-preview-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="evaluation-preview" class="preview-panel hidden">
+          <div class="score-grid">
+            <article class="score-card">
+              <span class="score-label">Actual Percentage</span>
+              <strong id="score-percentage">0.00%</strong>
+            </article>
+            <article class="score-card">
+              <span class="score-label">Category</span>
+              <strong id="score-category">Not Available</strong>
+            </article>
+            <article class="score-card">
+              <span class="score-label">Decision</span>
+              <strong id="score-decision">Not Available</strong>
+            </article>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Point</th>
+                  <th>Allocation</th>
+                  <th>Weight</th>
+                  <th>Weighted</th>
+                  <th>Selection</th>
+                  <th>Rationale</th>
+                </tr>
+              </thead>
+              <tbody id="evaluation-preview-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </section>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
